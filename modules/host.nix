@@ -398,7 +398,7 @@ in
     # Additionally, it persists the UID/GID mapping for user namespaces.
     systemd.tmpfiles.settings."10-nixos-nspawn" = lib.mapAttrs' (
       name: _:
-      lib.nameValuePair "/var/lib/machines/${name}" {
+      lib.nameValuePair "/var/lib/machines/${name}/usr" {
         d = {
           user = "524288";
           group = "524288";
