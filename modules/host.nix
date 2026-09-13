@@ -297,127 +297,131 @@ in
     };
   };
 
-  config = lib.mkIf (lib.length (lib.attrNames cfg.containers) > 0) {
-    networking = {
-      useNetworkd = true;
-      firewall.interfaces = lib.genAttrs [ "ve-+" "vz-+" ] (_: {
-        allowedTCPPorts = [
-          5353 # MDNS
-        ];
-        allowedUDPPorts = [
-          67 # DHCP
-          5353 # MDNS
-        ];
-      });
-    };
+  config =
+    let
+      wildcard = if config.networking.nftables.enable then "*" else "+";
+    in
+    lib.mkIf (lib.length (lib.attrNames cfg.containers) > 0) {
+      networking = {
+        useNetworkd = true;
+        firewall.interfaces = lib.genAttrs [ "ve-${wildcard}" "vz-${wildcard}" ] (_: {
+          allowedTCPPorts = [
+            5353 # MDNS
+          ];
+          allowedUDPPorts = [
+            67 # DHCP
+            5353 # MDNS
+          ];
+        });
+      };
 
-    systemd.network.networks = lib.flip lib.mapAttrs' cfg.containers (
-      name: containerCfg:
-      let
-        zone = containerCfg.network.veth.zone;
-        prefix = if zone == null then "ve" else "vz";
-        suffix = if zone == null then name else zone;
-        ifname = "${prefix}-${suffix}";
-        kind =
-          {
-            ve = "veth";
-            vz = "bridge";
-          }
-          .${prefix};
-      in
-      lib.nameValuePair "10-${ifname}" (
+      systemd.network.networks = lib.flip lib.mapAttrs' cfg.containers (
+        name: containerCfg:
         let
-          veth = containerCfg.network.veth;
-          customConfig = if veth.config.host != null then veth.config.host else { };
+          zone = containerCfg.network.veth.zone;
+          prefix = if zone == null then "ve" else "vz";
+          suffix = if zone == null then name else zone;
+          ifname = "${prefix}-${suffix}";
+          kind =
+            {
+              ve = "veth";
+              vz = "bridge";
+            }
+            .${prefix};
         in
-        lib.mkIf veth.enable (
-          lib.mkMerge [
-            (hostVdevNetwork ifname kind)
-            customConfig
-          ]
-        )
-      )
-    );
-
-    systemd.nspawn = lib.flip lib.mapAttrs cfg.containers (
-      _name: containerCfg: {
-        execConfig = {
-          Ephemeral = true;
-          # We're running our own init from the system path.
-          Boot = false;
-          Parameters = "${containerCfg.path}/init";
-          # Pick a free UID/GID range and apply user namespace isolation.
-          PrivateUsers = "pick";
-          # Place the journal on the host to make it persistent
-          LinkJournal = "try-host";
-          # NixOS config takes care of the timezone
-          Timezone = "off";
-          # Trigger an orderly shutdown when unit is stopped
-          KillSignal = "SIGRTMIN+3";
-        };
-        filesConfig =
+        lib.nameValuePair "10-${ifname}" (
           let
-            bindsToList =
-              {
-                readOnly ? false,
-              }:
-              lib.mapAttrsToList (
-                cpath: cfg:
-                let
-                  hostPath = if (cfg.hostPath != null) then cfg.hostPath else cpath;
-                  maybeOptions = lib.optionalString (
-                    lib.length cfg.options > 0
-                  ) ":${lib.concatStringsSep "," cfg.options}";
-                in
-                "${hostPath}:${cpath}${maybeOptions}"
-              ) (lib.filterAttrs (_: cfg: cfg.readOnly == readOnly) containerCfg.binds);
+            veth = containerCfg.network.veth;
+            customConfig = if veth.config.host != null then veth.config.host else { };
           in
-          {
-            # This chowns the directory /var/lib/machines/${name} to ensure that
-            # always same UID/GID mapping range is used. Since the directory is
-            # empty the operation is fast and only happens on first boot.
-            PrivateUsersOwnership = "chown";
+          lib.mkIf veth.enable (
+            lib.mkMerge [
+              (hostVdevNetwork ifname kind)
+              customConfig
+            ]
+          )
+        )
+      );
 
-            Bind = bindsToList { readOnly = false; };
-            BindReadOnly = bindsToList { readOnly = true; };
+      systemd.nspawn = lib.flip lib.mapAttrs cfg.containers (
+        _name: containerCfg: {
+          execConfig = {
+            Ephemeral = true;
+            # We're running our own init from the system path.
+            Boot = false;
+            Parameters = "${containerCfg.path}/init";
+            # Pick a free UID/GID range and apply user namespace isolation.
+            PrivateUsers = "pick";
+            # Place the journal on the host to make it persistent
+            LinkJournal = "try-host";
+            # NixOS config takes care of the timezone
+            Timezone = "off";
+            # Trigger an orderly shutdown when unit is stopped
+            KillSignal = "SIGRTMIN+3";
           };
-        networkConfig = {
-          # XXX: Do we want to support host networking?
-          Private = true;
-          VirtualEthernet = containerCfg.network.veth.enable;
-          Zone =
+          filesConfig =
             let
-              zone = containerCfg.network.veth.zone;
+              bindsToList =
+                {
+                  readOnly ? false,
+                }:
+                lib.mapAttrsToList (
+                  cpath: cfg:
+                  let
+                    hostPath = if (cfg.hostPath != null) then cfg.hostPath else cpath;
+                    maybeOptions = lib.optionalString (
+                      lib.length cfg.options > 0
+                    ) ":${lib.concatStringsSep "," cfg.options}";
+                  in
+                  "${hostPath}:${cpath}${maybeOptions}"
+                ) (lib.filterAttrs (_: cfg: cfg.readOnly == readOnly) containerCfg.binds);
             in
-            lib.mkIf (zone != null) zone;
-        };
-      }
-    );
+            {
+              # This chowns the directory /var/lib/machines/${name} to ensure that
+              # always same UID/GID mapping range is used. Since the directory is
+              # empty the operation is fast and only happens on first boot.
+              PrivateUsersOwnership = "chown";
 
-    # We create this dummy image directory because systemd-nspawn fails otherwise.
-    # Additionally, it persists the UID/GID mapping for user namespaces.
-    systemd.tmpfiles.settings."10-nixos-nspawn" = lib.mapAttrs' (
-      name: _:
-      lib.nameValuePair "/var/lib/machines/${name}/usr" {
-        d = {
-          user = "524288";
-          group = "524288";
-        };
-      }
-    ) cfg.containers;
+              Bind = bindsToList { readOnly = false; };
+              BindReadOnly = bindsToList { readOnly = true; };
+            };
+          networkConfig = {
+            # XXX: Do we want to support host networking?
+            Private = true;
+            VirtualEthernet = containerCfg.network.veth.enable;
+            Zone =
+              let
+                zone = containerCfg.network.veth.zone;
+              in
+              lib.mkIf (zone != null) zone;
+          };
+        }
+      );
 
-    # Activate the container units with machines.target
-    systemd.targets.machines.wants = lib.mapAttrsToList (name: _: "systemd-nspawn@${name}.service") (
-      lib.filterAttrs (_n: c: c.autoStart) cfg.containers
-    );
+      # We create this dummy image directory because systemd-nspawn fails otherwise.
+      # Additionally, it persists the UID/GID mapping for user namespaces.
+      systemd.tmpfiles.settings."10-nixos-nspawn" = lib.mapAttrs' (
+        name: _:
+        lib.nameValuePair "/var/lib/machines/${name}/usr" {
+          d = {
+            user = "524288";
+            group = "524288";
+          };
+        }
+      ) cfg.containers;
 
-    # Restart containers if configuration path changes
-    systemd.services = lib.mapAttrs' (
-      name: c:
-      lib.nameValuePair "systemd-nspawn@${name}" {
-        overrideStrategy = "asDropin";
-        restartTriggers = [ c.path ];
-      }
-    ) (lib.filterAttrs (_n: c: c.restartIfChanged) cfg.containers);
-  };
+      # Activate the container units with machines.target
+      systemd.targets.machines.wants = lib.mapAttrsToList (name: _: "systemd-nspawn@${name}.service") (
+        lib.filterAttrs (_n: c: c.autoStart) cfg.containers
+      );
+
+      # Restart containers if configuration path changes
+      systemd.services = lib.mapAttrs' (
+        name: c:
+        lib.nameValuePair "systemd-nspawn@${name}" {
+          overrideStrategy = "asDropin";
+          restartTriggers = [ c.path ];
+        }
+      ) (lib.filterAttrs (_n: c: c.restartIfChanged) cfg.containers);
+    };
 }
